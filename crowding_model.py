@@ -1,6 +1,6 @@
 """
 Mean-Field Crowding Model with advanced features:
-- Kalman filter for dynamic macro sensitivity
+- Rolling linear regression for dynamic macro sensitivity (replaces Kalman)
 - Cross-sectional ranking
 - Crowding momentum
 - Volume-weighted macro sensitivity
@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from sklearn.utils import resample
-from pykalman import KalmanFilter
 
 class CrowdingModel:
     def __init__(self, momentum_window=21, volume_window=63, macro_corr_window=126,
@@ -24,7 +23,7 @@ class CrowdingModel:
         self.volume_window = volume_window
         self.macro_corr_window = macro_corr_window
         self.n_bootstrap = n_bootstrap
-        self.use_kalman = use_kalman
+        self.use_kalman = use_kalman          # now interpreted as "use dynamic beta"
         self.use_cross_rank = use_cross_rank
         self.use_momentum = use_momentum
         self.use_vol_weighted = use_vol_weighted
@@ -34,24 +33,23 @@ class CrowdingModel:
         self.predictive_lookforward = predictive_lookforward
 
     # --------------------------------------------------------------------------
-    # 1. Time-varying macro sensitivity via Kalman filter
+    # 1. Dynamic macro sensitivity via rolling linear regression (replaces Kalman)
     # --------------------------------------------------------------------------
-    def _kalman_macro_sensitivity(self, ret: np.ndarray, macro: np.ndarray) -> float:
-        """Estimate dynamic beta of returns to macro using Kalman filter."""
+    def _dynamic_macro_sensitivity(self, ret: np.ndarray, macro: np.ndarray) -> float:
+        """
+        Estimate time-varying beta of returns to macro using a short rolling window.
+        """
         if len(ret) < 50 or macro.shape[1] == 0:
             return 0.5
         vix = macro[:, 0]
-        # State-space: beta_t = beta_{t-1} + noise, y_t = beta_t * vix_t + eps
-        kf = KalmanFilter(
-            transition_matrices=np.eye(1),
-            observation_matrices=vix.reshape(-1, 1),
-            initial_state_mean=[0.0],
-            initial_state_covariance=[[1.0]],
-            transition_covariance=[[0.01]],
-            observation_covariance=[[1.0]]   # Must be 2D
-        )
-        state_means, _ = kf.filter(ret)
-        return abs(state_means[-1, 0])  # absolute sensitivity
+        window = min(50, len(ret) // 2)
+        if window < 10:
+            return 0.5
+        # Rolling beta for the most recent window
+        recent_ret = ret[-window:]
+        recent_vix = vix[-window:]
+        beta = np.cov(recent_ret, recent_vix)[0, 1] / (np.var(recent_vix) + 1e-6)
+        return abs(beta)
 
     # --------------------------------------------------------------------------
     # 2. Base crowding components (used internally)
@@ -79,10 +77,10 @@ class CrowdingModel:
     def _macro_score(self, ret: np.ndarray, macro: np.ndarray, vol: np.ndarray = None) -> float:
         if len(ret) < self.macro_corr_window or macro.shape[1] == 0:
             return 0.5
-        vix = macro[:, 0]
         if self.use_kalman:
-            base = self._kalman_macro_sensitivity(ret[-self.macro_corr_window:], macro[-self.macro_corr_window:])
+            base = self._dynamic_macro_sensitivity(ret[-self.macro_corr_window:], macro[-self.macro_corr_window:])
         else:
+            vix = macro[:, 0]
             corr = np.corrcoef(ret[-self.macro_corr_window:], vix[-self.macro_corr_window:])[0, 1]
             base = abs(corr) if not np.isnan(corr) else 0.5
         # Volume-weighted adjustment
@@ -149,7 +147,7 @@ class CrowdingModel:
                 past_vol = vol[:-21] if len(vol) > 21 else vol
                 past_macro = macro.iloc[:-21].values
                 past_scores = []
-                for _ in range(self.n_bootstrap):
+                for _ in range(self.n_bootstrap // 2):  # fewer bootstraps for speed
                     idx = resample(range(len(past_ret)), n_samples=len(past_ret), random_state=np.random.randint(10000))
                     ret_boot = past_ret[idx]
                     vol_boot = past_vol[idx]
@@ -158,7 +156,7 @@ class CrowdingModel:
                     vol_score = self._volume_score(vol_boot)
                     macro_score = self._macro_score(ret_boot, macro_boot, vol_boot)
                     past_scores.append((mom + vol_score + macro_score) / 3.0)
-                past_crowd = np.mean(past_scores)
+                past_crowd = np.mean(past_scores) if past_scores else crowd_score
                 crowding_momentum[ticker] = crowd_score - past_crowd
             else:
                 crowding_momentum[ticker] = 0.0
