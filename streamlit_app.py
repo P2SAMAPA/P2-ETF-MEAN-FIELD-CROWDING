@@ -59,6 +59,32 @@ if data:
 st.markdown('<div class="main-header">🧑‍🤝‍🧑 P2Quant Mean-Field Crowding</div>', unsafe_allow_html=True)
 st.markdown('<div>Mean‑Field Crowding Proxy – Momentum, Volume & Macro Sensitivity</div>', unsafe_allow_html=True)
 
+# --- Explanation Expander ---
+with st.expander("📘 What does 'Crowding' mean?", expanded=False):
+    st.markdown("""
+    ### Crowding Score (0–1)
+    
+    **Crowding** measures how "popular" or "overbought" an ETF is, based on three signals:
+    
+    1. **Momentum Crowding**: How extreme recent returns are relative to history.  
+       *High z‑score → potential mean reversion risk.*
+    2. **Volume Crowding**: Recent trading volume relative to long‑term average.  
+       *Elevated volume often indicates institutional positioning.*
+    3. **Macro Crowding**: Correlation of the ETF's returns with the VIX (fear index).  
+       *High correlation means the ETF is sensitive to macro shocks and likely crowded by systematic strategies.*
+    
+    **Interpretation:**
+    - **High (>0.7)** : Strong crowding signal — risk of reversal if momentum fades.
+    - **Mid (0.4–0.7)** : Moderate crowding — neutral.
+    - **Low (<0.4)** : Little crowding — less downside risk from positioning.
+    
+    **Crowding‑Adjusted Return:**  
+    `Adj Return = Raw Return × (1 - Crowding Score)`  
+    *(Negative raw returns get a smaller penalty, as short‑side crowding is less risky.)*
+    
+    The engine selects ETFs with the **highest crowding‑adjusted return**, favoring assets with positive return potential and low crowding risk.
+    """)
+
 if data is None:
     st.warning("No data available.")
     st.stop()
@@ -79,12 +105,14 @@ for tab, key in zip(tabs, universe_keys):
             ticker = pick['ticker']
             ret = pick['expected_return_adj']
             crowd = pick['crowding_score']
+            ci_low = pick.get('crowding_ci_lower', crowd)
+            ci_high = pick.get('crowding_ci_upper', crowd)
             st.markdown(f"""
             <div class="hero-card">
                 <div style="font-size: 1.2rem; opacity: 0.8;">🧑‍🤝‍🧑 TOP PICK (Least Crowded)</div>
                 <div class="hero-ticker">{ticker}</div>
                 <div style="font-size: 1.5rem;">Adj Return: {ret*100:.2f}%</div>
-                <div style="margin-top: 1rem;">Crowding: {crowding_badge(crowd)}</div>
+                <div style="margin-top: 1rem;">Crowding: {crowding_badge(crowd)} (95% CI: {ci_low:.2f}–{ci_high:.2f})</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -94,7 +122,9 @@ for tab, key in zip(tabs, universe_keys):
                 rows.append({
                     "Ticker": p['ticker'],
                     "Adj Return": f"{p['expected_return_adj']*100:.2f}%",
-                    "Crowding": f"{p['crowding_score']:.2f}"
+                    "Crowding": f"{p['crowding_score']:.2f}",
+                    "CI Low": f"{p.get('crowding_ci_lower', 0):.2f}",
+                    "CI High": f"{p.get('crowding_ci_upper', 0):.2f}"
                 })
             df = pd.DataFrame(rows)
             st.dataframe(df, use_container_width=True, hide_index=True)
