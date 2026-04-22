@@ -19,7 +19,8 @@ def run_crowding():
     model = CrowdingModel(
         momentum_window=config.MOMENTUM_WINDOW,
         volume_window=config.VOLUME_WINDOW,
-        macro_corr_window=config.MACRO_CORR_WINDOW
+        macro_corr_window=config.MACRO_CORR_WINDOW,
+        n_bootstrap=50  # Increased complexity
     )
 
     all_results = {}
@@ -40,7 +41,7 @@ def run_crowding():
         recent_volume = recent_volume.loc[common_idx]
         recent_macro = recent_macro.loc[common_idx]
 
-        crowding_scores = model.compute_crowding_score(recent_returns, recent_volume, recent_macro)
+        crowding_scores, cis = model.compute_crowding_score(recent_returns, recent_volume, recent_macro)
         expected_returns = model.compute_expected_return(recent_returns)
         adj_returns = model.compute_crowding_adjusted_return(expected_returns, crowding_scores)
 
@@ -51,6 +52,8 @@ def run_crowding():
                     "ticker": ticker,
                     "expected_return_raw": expected_returns.get(ticker, 0.0),
                     "crowding_score": crowding_scores.get(ticker, 0.5),
+                    "crowding_ci_lower": cis.get(ticker, {}).get("lower", 0.5),
+                    "crowding_ci_upper": cis.get(ticker, {}).get("upper", 0.5),
                     "expected_return_adj": adj_returns.get(ticker, 0.0)
                 }
 
@@ -59,7 +62,9 @@ def run_crowding():
                                 key=lambda x: x[1]["expected_return_adj"], reverse=True)
         top_picks[universe_name] = [
             {"ticker": t, "expected_return_adj": d["expected_return_adj"],
-             "crowding_score": d["crowding_score"]}
+             "crowding_score": d["crowding_score"],
+             "crowding_ci_lower": d["crowding_ci_lower"],
+             "crowding_ci_upper": d["crowding_ci_upper"]}
             for t, d in sorted_tickers[:3]
         ]
 
@@ -68,7 +73,8 @@ def run_crowding():
         "config": {
             "momentum_window": config.MOMENTUM_WINDOW,
             "volume_window": config.VOLUME_WINDOW,
-            "macro_corr_window": config.MACRO_CORR_WINDOW
+            "macro_corr_window": config.MACRO_CORR_WINDOW,
+            "n_bootstrap": 50
         },
         "daily_trading": {
             "universes": all_results,
