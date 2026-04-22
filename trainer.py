@@ -100,9 +100,15 @@ def run_crowding():
             for t, d in sorted_tickers[:3]
         ]
 
+    # Build config summary without sensitive keys
+    config_summary = {}
+    for k, v in config.__dict__.items():
+        if not k.startswith("_") and k.isupper() and k not in ["HF_TOKEN"]:
+            config_summary[k] = v
+
     output_payload = {
         "run_date": config.TODAY,
-        "config": {k: v for k, v in config.__dict__.items() if not k.startswith("_") and k.isupper()},
+        "config": config_summary,
         "daily_trading": {
             "universes": all_results,
             "top_picks": top_picks
