@@ -12,7 +12,6 @@ Mean-Field Crowding Model with advanced features:
 import numpy as np
 import pandas as pd
 from scipy import stats
-from scipy.linalg import solve
 from sklearn.utils import resample
 from pykalman import KalmanFilter
 
@@ -43,12 +42,14 @@ class CrowdingModel:
             return 0.5
         vix = macro[:, 0]
         # State-space: beta_t = beta_{t-1} + noise, y_t = beta_t * vix_t + eps
-        kf = KalmanFilter(transition_matrices=np.eye(1),
-                          observation_matrices=vix.reshape(-1, 1),
-                          initial_state_mean=[0.0],
-                          initial_state_covariance=[[1.0]],
-                          transition_covariance=[[0.01]],
-                          observation_covariance=1.0)
+        kf = KalmanFilter(
+            transition_matrices=np.eye(1),
+            observation_matrices=vix.reshape(-1, 1),
+            initial_state_mean=[0.0],
+            initial_state_covariance=[[1.0]],
+            transition_covariance=[[0.01]],
+            observation_covariance=[[1.0]]   # Must be 2D
+        )
         state_means, _ = kf.filter(ret)
         return abs(state_means[-1, 0])  # absolute sensitivity
 
@@ -87,7 +88,7 @@ class CrowdingModel:
         # Volume-weighted adjustment
         if self.use_vol_weighted and vol is not None:
             vol_ratio = self._volume_score(vol)
-            base = base * (0.5 + 0.5 * vol_ratio)  # scale up if volume is elevated
+            base = base * (0.5 + 0.5 * vol_ratio)
         return base
 
     # --------------------------------------------------------------------------
@@ -167,17 +168,15 @@ class CrowdingModel:
             score_series = pd.Series(scores)
             rank_pct = score_series.rank(pct=True)
             for t in scores:
-                scores[t] = rank_pct[t]  # replace with percentile rank
+                scores[t] = rank_pct[t]
 
         # Regime-conditional threshold adjustment
         if self.use_regime:
             vix_level = macro['VIX'].iloc[-1] if 'VIX' in macro.columns else 20
             if vix_level > 30:
-                # High VIX: lower the threshold for "high crowding"
                 for t in scores:
                     scores[t] = min(scores[t] * 1.2, 1.0)
             elif vix_level < 15:
-                # Low VIX: raise the threshold
                 for t in scores:
                     scores[t] = scores[t] * 0.8
 
@@ -200,7 +199,7 @@ class CrowdingModel:
                                          crowding_score: pd.Series) -> tuple:
         adj = expected_return * (1 - crowding_score)
         adj = adj.where(expected_return >= 0, expected_return * (1 - 0.5 * crowding_score))
-        alpha = expected_return * (1 - crowding_score)  # pure alpha component
+        alpha = expected_return * (1 - crowding_score)
         penalty = expected_return - adj
         return adj, alpha, penalty
 
@@ -219,7 +218,6 @@ class CrowdingModel:
             if len(ret) < self.macro_corr_window + self.predictive_lookforward:
                 valid[ticker] = 0.0
                 continue
-            # Rolling correlation of crowding score (lagged) with forward returns
             crowd_hist = crowding_scores[ticker]
             fwd_ret = ret.shift(-self.predictive_lookforward).rolling(self.macro_corr_window).mean()
             corr = crowd_hist.rolling(self.macro_corr_window).corr(fwd_ret).iloc[-1]
