@@ -29,14 +29,24 @@ UNIVERSES = {
 MACRO_COLS = ["VIX", "DXY", "T10Y2Y", "TBILL_3M"]
 
 # --- Crowding Parameters ---
-MOMENTUM_WINDOW = 21                  # Days for momentum calculation
-VOLUME_WINDOW = 63                    # Baseline for relative volume
-MACRO_CORR_WINDOW = 126               # Window for macro correlation
-MIN_OBSERVATIONS = 252                # Minimum data required
+MOMENTUM_WINDOW = 21
+VOLUME_WINDOW = 63
+MACRO_CORR_WINDOW = 126
+MIN_OBSERVATIONS = 252
+N_BOOTSTRAP = 50
 RANDOM_SEED = 42
 
-# --- Expected Return ---
-RETURN_LOOKBACK = 21                  # Days for raw expected return
+# --- Advanced Features ---
+USE_KALMAN_MACRO = True            # Time-varying macro sensitivity via Kalman filter
+USE_CROSS_SECTIONAL_RANK = True    # Normalize scores within universe
+USE_CROWDING_MOMENTUM = True       # Rate of change of crowding score
+USE_VOLUME_WEIGHTED_MACRO = True   # Volume × VIX correlation
+USE_REGIME_THRESHOLDS = True       # Adjust high-crowding threshold based on VIX level
+USE_RETURN_DECOMP = True           # Decompose expected return into alpha and crowding penalty
+USE_PREDICTIVE_VALIDATION = True   # Correlation of past crowding with future returns
+
+# --- Predictive Validation ---
+PREDICTIVE_LOOKFORWARD = 5         # Days ahead for validation
 
 # --- Shrinking Windows ---
 SHRINKING_WINDOW_START_YEARS = list(range(2010, 2025))
