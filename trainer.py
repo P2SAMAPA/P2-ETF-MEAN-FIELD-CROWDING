@@ -1,5 +1,5 @@
 """
-Main training script for Mean-Field Crowding engine.
+Main training script for Mean-Field Crowding engine with advanced features.
 """
 
 import json
@@ -20,7 +20,15 @@ def run_crowding():
         momentum_window=config.MOMENTUM_WINDOW,
         volume_window=config.VOLUME_WINDOW,
         macro_corr_window=config.MACRO_CORR_WINDOW,
-        n_bootstrap=50  # Increased complexity
+        n_bootstrap=config.N_BOOTSTRAP,
+        use_kalman=config.USE_KALMAN_MACRO,
+        use_cross_rank=config.USE_CROSS_SECTIONAL_RANK,
+        use_momentum=config.USE_CROWDING_MOMENTUM,
+        use_vol_weighted=config.USE_VOLUME_WEIGHTED_MACRO,
+        use_regime=config.USE_REGIME_THRESHOLDS,
+        use_decomp=config.USE_RETURN_DECOMP,
+        use_predictive=config.USE_PREDICTIVE_VALIDATION,
+        predictive_lookforward=config.PREDICTIVE_LOOKFORWARD
     )
 
     all_results = {}
@@ -41,9 +49,12 @@ def run_crowding():
         recent_volume = recent_volume.loc[common_idx]
         recent_macro = recent_macro.loc[common_idx]
 
-        crowding_scores, cis = model.compute_crowding_score(recent_returns, recent_volume, recent_macro)
+        crowding_scores, cis, crowd_mom, mom_raw, vol_raw, macro_raw = model.compute_crowding_score(
+            recent_returns, recent_volume, recent_macro
+        )
         expected_returns = model.compute_expected_return(recent_returns)
-        adj_returns = model.compute_crowding_adjusted_return(expected_returns, crowding_scores)
+        adj_returns, alpha, penalty = model.compute_crowding_adjusted_return(expected_returns, crowding_scores)
+        predictive_valid = model.predictive_validation(recent_returns, crowding_scores)
 
         universe_results = {}
         for ticker in tickers:
@@ -54,28 +65,27 @@ def run_crowding():
                     "crowding_score": crowding_scores.get(ticker, 0.5),
                     "crowding_ci_lower": cis.get(ticker, {}).get("lower", 0.5),
                     "crowding_ci_upper": cis.get(ticker, {}).get("upper", 0.5),
-                    "expected_return_adj": adj_returns.get(ticker, 0.0)
+                    "crowding_momentum": crowd_mom.get(ticker, 0.0),
+                    "momentum_raw": mom_raw.get(ticker, 0.5),
+                    "volume_raw": vol_raw.get(ticker, 0.5),
+                    "macro_raw": macro_raw.get(ticker, 0.5),
+                    "expected_return_adj": adj_returns.get(ticker, 0.0),
+                    "alpha": alpha.get(ticker, 0.0),
+                    "crowding_penalty": penalty.get(ticker, 0.0),
+                    "predictive_validity": predictive_valid.get(ticker, 0.0)
                 }
 
         all_results[universe_name] = universe_results
         sorted_tickers = sorted(universe_results.items(),
                                 key=lambda x: x[1]["expected_return_adj"], reverse=True)
         top_picks[universe_name] = [
-            {"ticker": t, "expected_return_adj": d["expected_return_adj"],
-             "crowding_score": d["crowding_score"],
-             "crowding_ci_lower": d["crowding_ci_lower"],
-             "crowding_ci_upper": d["crowding_ci_upper"]}
+            {k: v for k, v in d.items() if k != 'ticker'} | {"ticker": t}
             for t, d in sorted_tickers[:3]
         ]
 
     output_payload = {
         "run_date": config.TODAY,
-        "config": {
-            "momentum_window": config.MOMENTUM_WINDOW,
-            "volume_window": config.VOLUME_WINDOW,
-            "macro_corr_window": config.MACRO_CORR_WINDOW,
-            "n_bootstrap": 50
-        },
+        "config": {k: v for k, v in config.__dict__.items() if not k.startswith("_") and k.isupper()},
         "daily_trading": {
             "universes": all_results,
             "top_picks": top_picks
