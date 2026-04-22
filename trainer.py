@@ -1,5 +1,5 @@
 """
-Main training script for Mean-Field Crowding engine with advanced features.
+Main training script for Mean-Field Crowding engine.
 """
 
 import json
@@ -41,20 +41,37 @@ def run_crowding():
         if len(returns) < config.MIN_OBSERVATIONS:
             continue
 
-        recent_returns = returns.iloc[-config.MIN_OBSERVATIONS:]
-        recent_volume = volume.iloc[-config.MIN_OBSERVATIONS:]
-        recent_macro = macro.loc[recent_returns.index].dropna()
-        common_idx = recent_returns.index.intersection(recent_macro.index)
-        recent_returns = recent_returns.loc[common_idx]
-        recent_volume = recent_volume.loc[common_idx]
-        recent_macro = recent_macro.loc[common_idx]
+        # Use all available history for predictive validation
+        full_returns = returns
+        full_volume = volume
+        full_macro = macro.loc[full_returns.index].dropna()
+        common_idx = full_returns.index.intersection(full_macro.index)
+        full_returns = full_returns.loc[common_idx]
+        full_volume = full_volume.loc[common_idx]
+        full_macro = full_macro.loc[common_idx]
 
+        # Compute crowding scores on the full history
+        crowding_scores_full, _, _, _, _, _ = model.compute_crowding_score(
+            full_returns, full_volume, full_macro
+        )
+        # Create a DataFrame of historical crowding scores (one column per ticker)
+        crowding_history = pd.DataFrame(index=full_returns.index)
+        for t in tickers:
+            if t in crowding_scores_full.index:
+                crowding_history[t] = crowding_scores_full[t]
+
+        # Use recent window for current scores
+        recent_returns = full_returns.iloc[-config.MIN_OBSERVATIONS:]
+        recent_volume = full_volume.iloc[-config.MIN_OBSERVATIONS:]
+        recent_macro = full_macro.loc[recent_returns.index]
         crowding_scores, cis, crowd_mom, mom_raw, vol_raw, macro_raw = model.compute_crowding_score(
             recent_returns, recent_volume, recent_macro
         )
         expected_returns = model.compute_expected_return(recent_returns)
         adj_returns, alpha, penalty = model.compute_crowding_adjusted_return(expected_returns, crowding_scores)
-        predictive_valid = model.predictive_validation(recent_returns, crowding_scores)
+
+        # Predictive validation using full history
+        predictive_valid = model.predictive_validation(full_returns, crowding_history)
 
         universe_results = {}
         for ticker in tickers:
