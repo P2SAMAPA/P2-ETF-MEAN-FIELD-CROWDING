@@ -1,12 +1,5 @@
 """
-Mean-Field Crowding Model with advanced features:
-- Rolling linear regression for dynamic macro sensitivity (replaces Kalman)
-- Cross-sectional ranking
-- Crowding momentum
-- Volume-weighted macro sensitivity
-- Regime-conditional thresholds
-- Return decomposition
-- Predictive validation
+Mean-Field Crowding Model with advanced features.
 """
 
 import numpy as np
@@ -23,7 +16,7 @@ class CrowdingModel:
         self.volume_window = volume_window
         self.macro_corr_window = macro_corr_window
         self.n_bootstrap = n_bootstrap
-        self.use_kalman = use_kalman          # now interpreted as "use dynamic beta"
+        self.use_kalman = use_kalman
         self.use_cross_rank = use_cross_rank
         self.use_momentum = use_momentum
         self.use_vol_weighted = use_vol_weighted
@@ -33,26 +26,22 @@ class CrowdingModel:
         self.predictive_lookforward = predictive_lookforward
 
     # --------------------------------------------------------------------------
-    # 1. Dynamic macro sensitivity via rolling linear regression (replaces Kalman)
+    # 1. Dynamic macro sensitivity via rolling linear regression
     # --------------------------------------------------------------------------
     def _dynamic_macro_sensitivity(self, ret: np.ndarray, macro: np.ndarray) -> float:
-        """
-        Estimate time-varying beta of returns to macro using a short rolling window.
-        """
         if len(ret) < 50 or macro.shape[1] == 0:
             return 0.5
         vix = macro[:, 0]
         window = min(50, len(ret) // 2)
         if window < 10:
             return 0.5
-        # Rolling beta for the most recent window
         recent_ret = ret[-window:]
         recent_vix = vix[-window:]
         beta = np.cov(recent_ret, recent_vix)[0, 1] / (np.var(recent_vix) + 1e-6)
         return abs(beta)
 
     # --------------------------------------------------------------------------
-    # 2. Base crowding components (used internally)
+    # 2. Base crowding components
     # --------------------------------------------------------------------------
     def _momentum_score(self, ret: np.ndarray) -> float:
         if len(ret) < self.momentum_window:
@@ -83,14 +72,13 @@ class CrowdingModel:
             vix = macro[:, 0]
             corr = np.corrcoef(ret[-self.macro_corr_window:], vix[-self.macro_corr_window:])[0, 1]
             base = abs(corr) if not np.isnan(corr) else 0.5
-        # Volume-weighted adjustment
         if self.use_vol_weighted and vol is not None:
             vol_ratio = self._volume_score(vol)
             base = base * (0.5 + 0.5 * vol_ratio)
         return base
 
     # --------------------------------------------------------------------------
-    # 3. Main crowding score with bootstrapping and advanced features
+    # 3. Main crowding score with bootstrapping
     # --------------------------------------------------------------------------
     def compute_crowding_score(self, returns: pd.DataFrame, volume: pd.DataFrame,
                                macro: pd.DataFrame) -> tuple:
@@ -141,13 +129,13 @@ class CrowdingModel:
             volume_raw[ticker] = np.mean(boot_vol)
             macro_raw[ticker] = np.mean(boot_macro)
 
-            # Crowding momentum: difference from 21 days ago
+            # Crowding momentum
             if self.use_momentum and len(ret) >= self.momentum_window + 21:
                 past_ret = ret[:-21]
                 past_vol = vol[:-21] if len(vol) > 21 else vol
                 past_macro = macro.iloc[:-21].values
                 past_scores = []
-                for _ in range(self.n_bootstrap // 2):  # fewer bootstraps for speed
+                for _ in range(self.n_bootstrap // 2):
                     idx = resample(range(len(past_ret)), n_samples=len(past_ret), random_state=np.random.randint(10000))
                     ret_boot = past_ret[idx]
                     vol_boot = past_vol[idx]
@@ -161,14 +149,14 @@ class CrowdingModel:
             else:
                 crowding_momentum[ticker] = 0.0
 
-        # Cross-sectional ranking within universe
+        # Cross-sectional ranking
         if self.use_cross_rank:
             score_series = pd.Series(scores)
             rank_pct = score_series.rank(pct=True)
             for t in scores:
                 scores[t] = rank_pct[t]
 
-        # Regime-conditional threshold adjustment
+        # Regime-conditional adjustment
         if self.use_regime:
             vix_level = macro['VIX'].iloc[-1] if 'VIX' in macro.columns else 20
             if vix_level > 30:
@@ -202,22 +190,31 @@ class CrowdingModel:
         return adj, alpha, penalty
 
     # --------------------------------------------------------------------------
-    # 5. Predictive validation
+    # 5. Predictive validation (fixed)
     # --------------------------------------------------------------------------
-    def predictive_validation(self, returns: pd.DataFrame, crowding_scores: pd.Series) -> pd.Series:
-        """Correlation between past crowding and future returns."""
+    def predictive_validation(self, returns: pd.DataFrame, 
+                              crowding_history: pd.DataFrame) -> pd.Series:
+        """
+        Correlation between historical crowding scores and future returns.
+        crowding_history: DataFrame with dates as index and tickers as columns.
+        """
         if not self.use_predictive:
-            return pd.Series(index=crowding_scores.index, data=0.0)
+            return pd.Series(index=crowding_history.columns, data=0.0)
+        
         valid = {}
+        common_idx = returns.index.intersection(crowding_history.index)
+        returns = returns.loc[common_idx]
+        crowding_history = crowding_history.loc[common_idx]
+
         for ticker in returns.columns:
-            if ticker not in crowding_scores.index:
+            if ticker not in crowding_history.columns:
                 continue
             ret = returns[ticker]
+            crowd = crowding_history[ticker]
             if len(ret) < self.macro_corr_window + self.predictive_lookforward:
                 valid[ticker] = 0.0
                 continue
-            crowd_hist = crowding_scores[ticker]
             fwd_ret = ret.shift(-self.predictive_lookforward).rolling(self.macro_corr_window).mean()
-            corr = crowd_hist.rolling(self.macro_corr_window).corr(fwd_ret).iloc[-1]
+            corr = crowd.rolling(self.macro_corr_window).corr(fwd_ret).iloc[-1]
             valid[ticker] = corr if not np.isnan(corr) else 0.0
         return pd.Series(valid)
