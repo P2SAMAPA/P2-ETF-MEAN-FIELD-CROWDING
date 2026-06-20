@@ -65,22 +65,23 @@ if data:
     st.sidebar.markdown(f"**Run Date:** {data.get('run_date', 'Unknown')}")
 
 st.markdown('<div class="main-header">🧑‍🤝‍🧑 P2Quant Mean-Field Crowding</div>', unsafe_allow_html=True)
-st.markdown('<div>Advanced Crowding Analysis – Kalman, Decomposition, Predictive Validation</div>', unsafe_allow_html=True)
+st.markdown('<div>Advanced Crowding Analysis – Exhaustion, Compression, Predictive Validation</div>', unsafe_allow_html=True)
 
 with st.expander("📘 What does 'Crowding' mean?", expanded=False):
     st.markdown("""
     ### Crowding Score (0–1)
     
-    **Crowding** measures how "popular" an ETF is, using:
-    - **Momentum Crowding**: Extreme recent returns.
-    - **Volume Crowding**: Elevated trading volume.
-    - **Macro Crowding**: Dynamic sensitivity to VIX (Kalman filter).
+    **Crowding** measures the risk of a popular trade unwinding, using a 5-factor structural model:
+    - **Momentum Exhaustion**: Detects if extreme returns are decelerating or reversing.
+    - **Volatility Compression**: Identifies tight ranging that often precedes crowded unwind breakouts.
+    - **Macro Sensitivity**: Dynamic rolling beta to VIX.
+    - **Cross-Sectional Crowding**: Measures if the entire universe is moving together (systemic risk).
+    - **Volume Anomaly**: Elevated recent trading volume.
     
-    **Advanced Features:**
-    - **Cross‑sectional rank**: Scores normalized within universe.
-    - **Crowding momentum**: Rate of change — rising crowding may signal imminent reversal.
-    - **Volume‑weighted macro**: Higher volume amplifies macro sensitivity.
-    - **Regime‑adjusted**: Thresholds adapt to VIX level.
+    **v2.0 Algorithm Improvements:**
+    - **Deterministic Scoring**: Replaced broken time-shuffling bootstrap with robust analytical scoring.
+    - **Adaptive Regime**: VIX thresholds are now based on rolling percentiles, not static numbers.
+    - **Asymmetric Unwind Penalty**: Crowded trades that are *currently losing* receive extra penalty to prevent catching falling knives.
     - **Return decomposition**: Adj Return = Pure Alpha – Crowding Penalty.
     - **Predictive validity**: Historical correlation between crowding and forward returns.
     """)
