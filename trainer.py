@@ -41,7 +41,7 @@ def run_crowding():
         if len(returns) < config.MIN_OBSERVATIONS:
             continue
 
-        # Use all available history for predictive validation
+        # Align data
         full_returns = returns
         full_volume = volume
         full_macro = macro.loc[full_returns.index].dropna()
@@ -50,27 +50,45 @@ def run_crowding():
         full_volume = full_volume.loc[common_idx]
         full_macro = full_macro.loc[common_idx]
 
-        # Compute crowding scores on the full history
-        crowding_scores_full, _, _, _, _, _ = model.compute_crowding_score(
-            full_returns, full_volume, full_macro
-        )
-        # Create a DataFrame of historical crowding scores (one column per ticker)
-        crowding_history = pd.DataFrame(index=full_returns.index)
-        for t in tickers:
-            if t in crowding_scores_full.index:
-                crowding_history[t] = crowding_scores_full[t]
+        # -----------------------------------------------------------------
+        # FIX: Build a TRUE time-series crowding history for predictive validation
+        # -----------------------------------------------------------------
+        print("  Computing rolling crowding history for predictive validation...")
+        crowding_history = pd.DataFrame(index=full_returns.index, columns=tickers, dtype=float)
+        step = 5  # Calculate every 5 days to keep runtime reasonable
+        min_start = config.MACRO_CORR_WINDOW + 21  # Need enough data for the model internally
+        
+        for i in range(min_start, len(full_returns), step):
+            window_returns = full_returns.iloc[i - min_start : i]
+            window_volume = full_volume.iloc[i - min_start : i]
+            window_macro = full_macro.iloc[i - min_start : i]
+            
+            scores, _, _, _, _, _ = model.compute_crowding_score(
+                window_returns, window_volume, window_macro
+            )
+            # Record the score at the current timestamp
+            current_date = full_returns.index[i-1]
+            for t in tickers:
+                if t in scores.index:
+                    crowding_history.at[current_date, t] = scores[t]
+                    
+        # Forward fill the gaps created by stepping
+        crowding_history = crowding_history.ffill()
 
-        # Use recent window for current scores
+        # -----------------------------------------------------------------
+        # Use recent window for CURRENT scores
+        # -----------------------------------------------------------------
         recent_returns = full_returns.iloc[-config.MIN_OBSERVATIONS:]
         recent_volume = full_volume.iloc[-config.MIN_OBSERVATIONS:]
         recent_macro = full_macro.loc[recent_returns.index]
+        
         crowding_scores, cis, crowd_mom, mom_raw, vol_raw, macro_raw = model.compute_crowding_score(
             recent_returns, recent_volume, recent_macro
         )
         expected_returns = model.compute_expected_return(recent_returns)
         adj_returns, alpha, penalty = model.compute_crowding_adjusted_return(expected_returns, crowding_scores)
 
-        # Predictive validation using full history
+        # Predictive validation using the TRUE rolling history
         predictive_valid = model.predictive_validation(full_returns, crowding_history)
 
         universe_results = {}
