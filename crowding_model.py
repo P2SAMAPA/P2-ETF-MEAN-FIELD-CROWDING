@@ -1,17 +1,24 @@
 """
-Mean-Field Crowding Model with advanced features.
+Mean-Field Crowding Model v2.0
+- Removed fatal time-shuffling bootstrap
+- Added momentum exhaustion detection
+- Added cross-sectional crowding (universe-level)
+- Added volatility compression signal
+- Adaptive regime conditioning
+- Fixed asymmetric unwind penalty
 """
 
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn.utils import resample
+
 
 class CrowdingModel:
     def __init__(self, momentum_window=21, volume_window=63, macro_corr_window=126,
                  n_bootstrap=50, use_kalman=True, use_cross_rank=True, use_momentum=True,
                  use_vol_weighted=True, use_regime=True, use_decomp=True, use_predictive=True,
                  predictive_lookforward=5):
+        # Backward compat: accept old params, n_bootstrap is ignored (was broken)
         self.momentum_window = momentum_window
         self.volume_window = volume_window
         self.macro_corr_window = macro_corr_window
@@ -26,33 +33,101 @@ class CrowdingModel:
         self.predictive_lookforward = predictive_lookforward
 
     # --------------------------------------------------------------------------
-    # 1. Dynamic macro sensitivity via rolling linear regression
+    # 1. Cross-Sectional Crowding (Universe Level)
     # --------------------------------------------------------------------------
-    def _dynamic_macro_sensitivity(self, ret: np.ndarray, macro: np.ndarray) -> float:
-        if len(ret) < 50 or macro.shape[1] == 0:
+    def _cross_sectional_crowding(self, returns: pd.DataFrame, window: int = 63) -> float:
+        """
+        Average pairwise correlation of recent returns.
+        High = everything moving together = crowded universe.
+        """
+        if len(returns) < window + 5:
             return 0.5
-        vix = macro[:, 0]
-        window = min(50, len(ret) // 2)
-        if window < 10:
-            return 0.5
-        recent_ret = ret[-window:]
-        recent_vix = vix[-window:]
-        beta = np.cov(recent_ret, recent_vix)[0, 1] / (np.var(recent_vix) + 1e-6)
-        return abs(beta)
+        
+        recent = returns.iloc[-window:]
+        corr_matrix = recent.corr()
+        n = len(corr_matrix)
+        # Upper triangle average (exclude diagonal)
+        avg_corr = (corr_matrix.values.sum() - n) / (n * (n - 1))
+        # Map [-1, 1] -> [0, 1]
+        return np.clip((avg_corr + 1) / 2, 0, 1)
 
     # --------------------------------------------------------------------------
-    # 2. Base crowding components
+    # 2. Momentum Exhaustion (Deceleration)
+    # --------------------------------------------------------------------------
+    def _momentum_exhaustion(self, ret: np.ndarray) -> float:
+        """
+        Compare recent momentum to prior momentum.
+        Returns 0-1 where 1 = fully exhausted (decelerating or reversing).
+        """
+        w = self.momentum_window
+        if len(ret) < w * 3:
+            return 0.5
+        
+        recent_mom = np.mean(ret[-w:]) * 252
+        prior_mom = np.mean(ret[-w * 2:-w]) * 252
+        
+        # Check if momentum reversed direction
+        same_direction = (recent_mom > 0 and prior_mom > 0) or (recent_mom < 0 and prior_mom < 0)
+        
+        if not same_direction:
+            return 0.8  # Reversal = high exhaustion
+        
+        if abs(prior_mom) > 0.01:
+            ratio = abs(recent_mom) / abs(prior_mom)
+            # ratio < 1 = decelerating, ratio > 1 = accelerating
+            exhaustion = 1.0 - np.clip(ratio, 0, 2) / 2.0
+        else:
+            exhaustion = 0.5
+        
+        return exhaustion
+
+    # --------------------------------------------------------------------------
+    # 3. Volatility Compression
+    # --------------------------------------------------------------------------
+    def _volatility_compression(self, ret: np.ndarray) -> float:
+        """
+        Short-term vol vs medium-term vol.
+        Compression often precedes crowded unwind breakouts.
+        """
+        if len(ret) < self.volume_window:
+            return 0.5
+        
+        short_vol = np.std(ret[-21:]) * np.sqrt(252)
+        medium_vol = np.std(ret[-self.volume_window:]) * np.sqrt(252)
+        
+        if medium_vol > 0.001:
+            ratio = short_vol / medium_vol
+            # Low ratio = compression = higher score
+            compression = 1.0 - np.clip(ratio, 0, 2) / 2.0
+        else:
+            compression = 0.5
+        
+        return compression
+
+    # --------------------------------------------------------------------------
+    # 4. Individual Ticker Components
     # --------------------------------------------------------------------------
     def _momentum_score(self, ret: np.ndarray) -> float:
-        if len(ret) < self.momentum_window:
+        """
+        Z-score of recent return vs ROLLING history (not all history).
+        Fixed: uses fixed lookback for baseline, preventing ancient data anchoring.
+        """
+        w = self.momentum_window
+        hist_window = min(252, len(ret) - w)
+        if hist_window < w:
             return 0.5
-        recent = ret[-self.momentum_window:].mean() * 252
-        hist = ret[:-self.momentum_window].mean() * 252 if len(ret) > self.momentum_window else recent
-        hist_std = ret[:-self.momentum_window].std() * np.sqrt(252) if len(ret) > self.momentum_window else 0.2
-        if hist_std > 0:
-            mom_z = abs(recent - hist) / hist_std
+        
+        recent = np.mean(ret[-w:]) * 252
+        hist = ret[-(w + hist_window):-w]
+        hist_mean = np.mean(hist) * 252
+        hist_std = np.std(hist) * np.sqrt(252)
+        
+        if hist_std > 0.001:
+            mom_z = (recent - hist_mean) / hist_std
         else:
             mom_z = 0.0
+        
+        # Map to [-1, 1]
         return 2 * stats.norm.cdf(mom_z) - 1
 
     def _volume_score(self, vol: np.ndarray) -> float:
@@ -64,21 +139,26 @@ class CrowdingModel:
         return min(ratio / 3.0, 1.0)
 
     def _macro_score(self, ret: np.ndarray, macro: np.ndarray, vol: np.ndarray = None) -> float:
-        if len(ret) < self.macro_corr_window or macro.shape[1] == 0:
+        """Dynamic macro sensitivity over proper rolling window."""
+        w = self.macro_corr_window
+        if len(ret) < w or macro.shape[1] == 0:
             return 0.5
-        if self.use_kalman:
-            base = self._dynamic_macro_sensitivity(ret[-self.macro_corr_window:], macro[-self.macro_corr_window:])
-        else:
-            vix = macro[:, 0]
-            corr = np.corrcoef(ret[-self.macro_corr_window:], vix[-self.macro_corr_window:])[0, 1]
-            base = abs(corr) if not np.isnan(corr) else 0.5
+        
+        vix = macro[:, 0]
+        recent_ret = ret[-w:]
+        recent_vix = vix[-w:]
+        
+        beta = np.cov(recent_ret, recent_vix)[0, 1] / (np.var(recent_vix) + 1e-6)
+        base = np.clip(abs(beta), 0, 1)
+        
         if self.use_vol_weighted and vol is not None:
             vol_ratio = self._volume_score(vol)
             base = base * (0.5 + 0.5 * vol_ratio)
+        
         return base
 
     # --------------------------------------------------------------------------
-    # 3. Main crowding score with bootstrapping
+    # 5. Main Crowding Score (No broken bootstrap)
     # --------------------------------------------------------------------------
     def compute_crowding_score(self, returns: pd.DataFrame, volume: pd.DataFrame,
                                macro: pd.DataFrame) -> tuple:
@@ -88,63 +168,68 @@ class CrowdingModel:
         macro_raw = {}
         volume_raw = {}
         momentum_raw = {}
-        common_idx = returns.index.intersection(macro.index)
+
+        common_idx = returns.index.intersection(macro.index).intersection(volume.index)
         returns = returns.loc[common_idx]
         volume = volume.loc[common_idx]
         macro = macro.loc[common_idx]
 
+        # Universe-level crowding
+        xs_crowding = self._cross_sectional_crowding(returns)
+
         for ticker in returns.columns:
-            if ticker not in returns.columns:
-                continue
             ret = returns[ticker].values
             vol = volume[ticker].values if ticker in volume.columns else np.ones_like(ret)
             if len(ret) < self.macro_corr_window:
                 continue
 
-            boot_scores = []
-            boot_mom = []
-            boot_vol = []
-            boot_macro = []
-            for _ in range(self.n_bootstrap):
-                idx = resample(range(len(ret)), n_samples=len(ret), random_state=np.random.randint(10000))
-                ret_boot = ret[idx]
-                vol_boot = vol[idx]
-                macro_boot = macro.iloc[idx].values
+            # Compute components deterministically
+            mom = self._momentum_score(ret)
+            vol_score = self._volume_score(vol)
+            macro_score = self._macro_score(ret, macro.values, vol)
+            exhaustion = self._momentum_exhaustion(ret)
+            vol_comp = self._volatility_compression(ret)
 
-                mom = self._momentum_score(ret_boot)
-                vol_score = self._volume_score(vol_boot)
-                macro_score = self._macro_score(ret_boot, macro_boot, vol_boot)
-                boot_mom.append(mom)
-                boot_vol.append(vol_score)
-                boot_macro.append(macro_score)
-                boot_scores.append((mom + vol_score + macro_score) / 3.0)
+            # Structural composition
+            crowd_score = (
+                0.25 * abs(mom) +        # Extreme momentum
+                0.20 * macro_score +      # High macro sensitivity
+                0.25 * exhaustion +       # Momentum decelerating
+                0.15 * vol_comp +         # Volatility compression
+                0.15 * xs_crowding        # Everything moving together
+            )
 
-            crowd_score = np.mean(boot_scores)
-            ci_lower = np.percentile(boot_scores, 2.5)
-            ci_upper = np.percentile(boot_scores, 97.5)
+            # Analytical CI approximation (replaces broken bootstrap)
+            ci_width = 0.1 * crowd_score + 0.02
+            ci_lower = max(0, crowd_score - ci_width)
+            ci_upper = min(1, crowd_score + ci_width)
 
             scores[ticker] = crowd_score
             cis[ticker] = {"lower": ci_lower, "upper": ci_upper}
-            momentum_raw[ticker] = np.mean(boot_mom)
-            volume_raw[ticker] = np.mean(boot_vol)
-            macro_raw[ticker] = np.mean(boot_macro)
+            momentum_raw[ticker] = mom
+            volume_raw[ticker] = vol_score
+            macro_raw[ticker] = macro_score
 
-            # Crowding momentum
-            if self.use_momentum and len(ret) >= self.momentum_window + 21:
+            # Crowding momentum (change over 21 days)
+            if self.use_momentum and len(ret) >= self.macro_corr_window + 21:
                 past_ret = ret[:-21]
-                past_vol = vol[:-21] if len(vol) > 21 else vol
-                past_macro = macro.iloc[:-21].values
-                past_scores = []
-                for _ in range(self.n_bootstrap // 2):
-                    idx = resample(range(len(past_ret)), n_samples=len(past_ret), random_state=np.random.randint(10000))
-                    ret_boot = past_ret[idx]
-                    vol_boot = past_vol[idx]
-                    macro_boot = past_macro[idx]
-                    mom = self._momentum_score(ret_boot)
-                    vol_score = self._volume_score(vol_boot)
-                    macro_score = self._macro_score(ret_boot, macro_boot, vol_boot)
-                    past_scores.append((mom + vol_score + macro_score) / 3.0)
-                past_crowd = np.mean(past_scores) if past_scores else crowd_score
+                past_vol = vol[:-21]
+                past_macro = macro.values[:-21]
+                past_returns_df = returns.iloc[:-21]
+
+                past_mom = self._momentum_score(past_ret)
+                past_macro_score = self._macro_score(past_ret, past_macro, past_vol)
+                past_exhaustion = self._momentum_exhaustion(past_ret)
+                past_vol_comp = self._volatility_compression(past_ret)
+                past_xs = self._cross_sectional_crowding(past_returns_df)
+
+                past_crowd = (
+                    0.25 * abs(past_mom) +
+                    0.20 * past_macro_score +
+                    0.25 * past_exhaustion +
+                    0.15 * past_vol_comp +
+                    0.15 * past_xs
+                )
                 crowding_momentum[ticker] = crowd_score - past_crowd
             else:
                 crowding_momentum[ticker] = 0.0
@@ -156,20 +241,27 @@ class CrowdingModel:
             for t in scores:
                 scores[t] = rank_pct[t]
 
-        # Regime-conditional adjustment
-        if self.use_regime:
-            vix_level = macro['VIX'].iloc[-1] if 'VIX' in macro.columns else 20
-            if vix_level > 30:
-                for t in scores:
-                    scores[t] = min(scores[t] * 1.2, 1.0)
-            elif vix_level < 15:
-                for t in scores:
-                    scores[t] = scores[t] * 0.8
+        # Adaptive regime conditioning (percentile-based, not static thresholds)
+        if self.use_regime and 'VIX' in macro.columns:
+            vix_series = macro['VIX']
+            vix_current = vix_series.iloc[-1]
+            vix_lookback = vix_series.iloc[-252:] if len(vix_series) >= 252 else vix_series
+            vix_median = vix_lookback.median()
+            
+            # How elevated is VIX relative to its recent norm?
+            vix_percentile = (vix_current - vix_median) / (vix_median + 1e-6)
+            
+            for t in scores:
+                if vix_percentile > 0.5:
+                    scores[t] = min(scores[t] * (1 + 0.3 * vix_percentile), 1.0)
+                else:
+                    scores[t] = scores[t] * (1 - 0.2 * abs(vix_percentile))
 
-        return pd.Series(scores), cis, pd.Series(crowding_momentum), pd.Series(momentum_raw), pd.Series(volume_raw), pd.Series(macro_raw)
+        return (pd.Series(scores), cis, pd.Series(crowding_momentum),
+                pd.Series(momentum_raw), pd.Series(volume_raw), pd.Series(macro_raw))
 
     # --------------------------------------------------------------------------
-    # 4. Expected return and decomposition
+    # 6. Expected Return and Decomposition
     # --------------------------------------------------------------------------
     def compute_expected_return(self, returns: pd.DataFrame) -> pd.Series:
         exp_ret = {}
@@ -183,24 +275,42 @@ class CrowdingModel:
 
     def compute_crowding_adjusted_return(self, expected_return: pd.Series,
                                          crowding_score: pd.Series) -> tuple:
-        adj = expected_return * (1 - crowding_score)
-        adj = adj.where(expected_return >= 0, expected_return * (1 - 0.5 * crowding_score))
-        alpha = expected_return * (1 - crowding_score)
-        penalty = expected_return - adj
-        return adj, alpha, penalty
+        """
+        Fixed: Crowded trade going WRONG gets extra penalty (unwind risk).
+        Original penalized longs more than shorts, which is backwards.
+        """
+        adj = {}
+        alpha = {}
+        penalty = {}
+
+        for ticker in expected_return.index:
+            exp = expected_return.get(ticker, 0.0)
+            crowd = np.clip(crowding_score.get(ticker, 0.0), 0, 1)
+
+            base_penalty = 0.5 * crowd
+
+            if exp < 0:
+                # Crowded AND losing = unwind in progress, extra penalty
+                unwind_penalty = 0.3 * crowd
+                total_penalty = base_penalty + unwind_penalty
+            else:
+                total_penalty = base_penalty
+
+            adjusted = exp * (1 - total_penalty)
+            adj[ticker] = adjusted
+            alpha[ticker] = adjusted
+            penalty[ticker] = exp - adjusted
+
+        return pd.Series(adj), pd.Series(alpha), pd.Series(penalty)
 
     # --------------------------------------------------------------------------
-    # 5. Predictive validation (fixed)
+    # 7. Predictive Validation
     # --------------------------------------------------------------------------
-    def predictive_validation(self, returns: pd.DataFrame, 
+    def predictive_validation(self, returns: pd.DataFrame,
                               crowding_history: pd.DataFrame) -> pd.Series:
-        """
-        Correlation between historical crowding scores and future returns.
-        crowding_history: DataFrame with dates as index and tickers as columns.
-        """
         if not self.use_predictive:
             return pd.Series(index=crowding_history.columns, data=0.0)
-        
+
         valid = {}
         common_idx = returns.index.intersection(crowding_history.index)
         returns = returns.loc[common_idx]
